@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.IBinder;
+import android.os.RemoteException;
 
 import java.util.LinkedList;
 import java.util.List;
@@ -22,22 +23,6 @@ public class ServiceFetcher {
     private final List<OnServiceConnectionListener> connectionListeners = new LinkedList<>();
     private ConnectStatus connectStatus = ConnectStatus.NOT_CONNECT;
     private IBinder binder;
-    private ServiceConnection connection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName name, IBinder service) {
-            binder = service;
-            for (OnServiceConnectionListener listener : connectionListeners) {
-                listener.onServiceConnected(service);
-            }
-            connectStatus = ConnectStatus.CONNECTED;
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
-            binder = null;
-            connectStatus = ConnectStatus.NOT_CONNECT;
-        }
-    };
 
     public ServiceFetcher(Context context, Intent intent, int flags) {
         this.context = context;
@@ -45,9 +30,46 @@ public class ServiceFetcher {
         this.flags = flags;
     }
 
+    private final IBinder.DeathRecipient resuscitation = () -> {
+        connectStatus = ConnectStatus.NOT_CONNECT;
+        bindService();
+    };
+
     public ServiceFetcher(Context context, Intent intent) {
         this(context, intent, Context.BIND_AUTO_CREATE);
     }
+
+    private final ServiceConnection connection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            binder = service;
+            for (OnServiceConnectionListener listener : connectionListeners) {
+                listener.onServiceConnected(service);
+            }
+            connectStatus = ConnectStatus.CONNECTED;
+            try {
+                binder.linkToDeath(resuscitation, flags);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            binder = null;
+            connectStatus = ConnectStatus.NOT_CONNECT;
+        }
+
+        @Override
+        public void onBindingDied(ComponentName name) {
+            ServiceConnection.super.onBindingDied(name);
+        }
+
+        @Override
+        public void onNullBinding(ComponentName name) {
+            ServiceConnection.super.onNullBinding(name);
+        }
+    };
 
     public Observable<IBinder> getService() {
         if (connectStatus == ConnectStatus.NOT_CONNECT) {
@@ -71,6 +93,7 @@ public class ServiceFetcher {
         if (connectStatus == ConnectStatus.NOT_CONNECT) {
             return;
         }
+        binder.unlinkToDeath(resuscitation, flags);
         context.unbindService(connection);
         connectStatus = ConnectStatus.NOT_CONNECT;
     }
@@ -92,10 +115,6 @@ public class ServiceFetcher {
         return connectionListeners.remove(listener);
     }
 
-    public interface OnServiceConnectionListener {
-        void onServiceConnected(IBinder service);
-    }
-
     public enum ConnectStatus {
         NOT_CONNECT(0),
         CONNECTING(1),
@@ -111,4 +130,10 @@ public class ServiceFetcher {
             return status;
         }
     }
+
+    public interface OnServiceConnectionListener {
+        void onServiceConnected(IBinder service);
+    }
+
+
 }
